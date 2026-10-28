@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Git Helper",
+    "description": "Shows the current project's Git branch beside the composer. Switch, create or merge branches, commit with an automatically summarized message, push, and initialize a repository."
+  }
+}

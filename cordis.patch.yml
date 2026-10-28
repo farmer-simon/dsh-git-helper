@@ -1,0 +1,5 @@
+# dsh-git-helper bundle patch: mounts the Host half (git HTTP API) and lets the
+# Web client module register the composer branch chip.
+- insert:
+    - id: dsh-git-helper
+      name: 'dsh-git-helper'
