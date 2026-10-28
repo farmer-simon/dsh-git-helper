@@ -14,7 +14,10 @@ import { __internals } from '../index.js';
 const {
   readStatus,
   readDiffStats,
+  collectDiffForModel,
   prepareCommit,
+  prepareCommitForSession,
+  sanitizeCommitMessage,
   switchBranch,
   createBranch,
   mergeBranch,
@@ -198,6 +201,83 @@ await check('readStatus reports detached HEAD and checkout returns', async () =>
   assert.equal(status.branch, null);
   const switched = await switchBranch(project, 'main');
   assert.equal(switched.status.branch, 'main');
+});
+
+/* --- model-assisted commit message ---------------------------------- */
+
+const fakeLlm = (text) => ({
+  stream() {
+    return (async function* generate() {
+      yield { type: 'text-delta', index: 0, text };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    })();
+  },
+});
+
+const fakeContext = (llm) => ({
+  get(name) {
+    if (name === 'llm') return llm;
+    if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'fake', model: 'model' }) };
+    return undefined;
+  },
+});
+
+const fakeSession = {
+  id: 'session-test',
+  requestHeader: () => ({ config: { provider: 'fake', model: 'model' } }),
+};
+
+await check('sanitizeCommitMessage accepts a conventional message', () => {
+  const message = sanitizeCommitMessage('docs(readme): 重写使用说明文档\n\n- 补充安装步骤\n- 更新已知限制');
+  assert.equal(message.split('\n')[0], 'docs(readme): 重写使用说明文档');
+  assert.match(message, /- 补充安装步骤/);
+});
+
+await check('sanitizeCommitMessage strips fences and labels', () => {
+  const message = sanitizeCommitMessage('提交信息：\n```\nfix(parser): 修复空输入崩溃。\n```');
+  assert.equal(message, 'fix(parser): 修复空输入崩溃');
+});
+
+await check('sanitizeCommitMessage rejects non-conventional output', () => {
+  assert.equal(sanitizeCommitMessage('更新了一些文件'), undefined);
+  assert.equal(sanitizeCommitMessage('update: 修改文件'), undefined);
+  assert.equal(sanitizeCommitMessage(''), undefined);
+});
+
+await check('collectDiffForModel includes status, diff and untracked preview', async () => {
+  writeFileSync(join(project, 'preview-test.txt'), '第一行\n第二行\n');
+  const status = await readStatus(project);
+  const text = await collectDiffForModel(project, status);
+  assert.match(text, /git status/);
+  assert.match(text, /preview-test\.txt/);
+  assert.match(text, /第一行/);
+  rmSync(join(project, 'preview-test.txt'));
+});
+
+await check('prepareCommitForSession uses the model message', async () => {
+  writeFileSync(join(project, 'model-test.txt'), 'model\n');
+  const prepared = await prepareCommitForSession(fakeContext(fakeLlm('docs(model): 测试模型生成的提交信息')), fakeSession, project);
+  assert.equal(prepared.generated, 'model');
+  assert.equal(prepared.model, 'fake/model');
+  assert.equal(prepared.message, 'docs(model): 测试模型生成的提交信息');
+  rmSync(join(project, 'model-test.txt'));
+});
+
+await check('prepareCommitForSession falls back on invalid model output', async () => {
+  writeFileSync(join(project, 'fallback-test.txt'), 'fallback\n');
+  const prepared = await prepareCommitForSession(fakeContext(fakeLlm('我更新了一些文件')), fakeSession, project);
+  assert.equal(prepared.generated, 'files');
+  assert.match(prepared.fallbackReason, /Conventional Commits/);
+  assert.match(prepared.message, /个文件/);
+  rmSync(join(project, 'fallback-test.txt'));
+});
+
+await check('prepareCommitForSession falls back without an LLM service', async () => {
+  writeFileSync(join(project, 'no-model-test.txt'), 'no model\n');
+  const prepared = await prepareCommitForSession(fakeContext(undefined), fakeSession, project);
+  assert.equal(prepared.generated, 'files');
+  assert.match(prepared.fallbackReason, /模型服务/);
+  rmSync(join(project, 'no-model-test.txt'));
 });
 
 rmSync(root, { recursive: true, force: true });

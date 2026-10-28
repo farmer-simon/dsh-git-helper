@@ -135,7 +135,7 @@ function withGitLock(key, task) {
   return current;
 }
 
-function resolveSessionDirectory(ctx, sessionId) {
+function resolveSession(ctx, sessionId) {
   if (typeof sessionId !== 'string' || sessionId === '') {
     throw new GitHelperError('缺少会话标识');
   }
@@ -143,6 +143,10 @@ function resolveSessionDirectory(ctx, sessionId) {
   if (session === undefined) {
     throw new GitHelperError('当前会话尚未启动或已关闭，无法读取项目目录');
   }
+  return session;
+}
+
+function resolveSessionDirectory(ctx, session) {
   let directory;
   try {
     directory = ctx.workingDirectory.get(session);
@@ -165,12 +169,13 @@ function resolveSessionDirectory(ctx, sessionId) {
 
 async function dispatch(ctx, body) {
   const action = typeof body.action === 'string' ? body.action : '';
-  const directory = resolveSessionDirectory(ctx, body.sessionId);
+  const session = resolveSession(ctx, body.sessionId);
+  const directory = resolveSessionDirectory(ctx, session);
   const lockKey = process.platform === 'win32' ? directory.toLowerCase() : directory;
-  return withGitLock(lockKey, () => runAction(action, body, directory));
+  return withGitLock(lockKey, () => runAction(ctx, session, action, body, directory));
 }
 
-async function runAction(action, body, directory) {
+async function runAction(ctx, session, action, body, directory) {
   switch (action) {
     case 'status':
       return readStatus(directory);
@@ -181,7 +186,7 @@ async function runAction(action, body, directory) {
     case 'merge':
       return mergeBranch(directory, requireString(body.branch, '分支名'));
     case 'prepare-commit':
-      return prepareCommit(directory);
+      return prepareCommitForSession(ctx, session, directory);
     case 'commit':
       return commitChanges(directory, requireString(body.message, '提交说明'));
     case 'push':
@@ -552,6 +557,206 @@ async function prepareCommit(directory) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Model-assisted commit message (Conventional Commits, Chinese)       */
+/* ------------------------------------------------------------------ */
+
+const COMMIT_TYPES = ['feat', 'fix', 'docs', 'refactor', 'test', 'chore'];
+const MODEL_DIFF_LIMIT = 16_000;
+const MODEL_TIMEOUT_MS = 45_000;
+const MODEL_MAX_TOKENS = 500;
+
+const COMMIT_SYSTEM_PROMPT = `你是 Git 提交信息生成器。请根据用户提供的真实改动，生成一条简洁、准确的中文 Conventional Commits 提交信息。
+
+规则：
+1. 第一行必须是“类型(可选范围): 概要”，例如 fix(parser): 修复空输入导致的崩溃。
+2. 类型只能是以下之一：feat（新功能）、fix（修复缺陷）、docs（文档改动）、refactor（不改变行为的重构）、test（新增或调整测试）、chore（杂项维护，如依赖、构建、配置）。
+3. 概要用中文，不超过 50 个汉字，不以句号结尾。
+4. 只有在确实需要时才空一行写 1 到 3 条要点，每条以“- ”开头；简单改动不要写正文。
+5. 只能描述改动中实际存在的内容，不要编造未发生的功能、原因或影响。
+6. 只输出提交信息本身，不要输出解释、前后缀、Markdown 代码块或格式说明。`;
+
+function projectName(path) {
+  const parts = String(path ?? '').split(/[\\/]+/).filter((part) => part !== '');
+  return parts.length > 0 ? parts[parts.length - 1] : '';
+}
+
+/** Keep a small text preview of an untracked file for the model prompt. */
+function textPreview(path, maxLines) {
+  try {
+    const info = statSync(path);
+    if (!info.isFile() || info.size > 512 * 1024) return undefined;
+    const buffer = readFileSync(path);
+    if (buffer.includes(0)) return undefined; // binary
+    const text = buffer.toString('utf8');
+    const lines = text.split(/\r?\n/);
+    const shown = lines.slice(0, maxLines).join('\n');
+    return text.trim() === '' ? undefined : shown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Build the bounded description of the working tree the model is asked to
+ * summarize: the status list, the tracked diff, and previews of untracked new
+ * files. Everything is capped so one preview cannot send a whole repository.
+ */
+async function collectDiffForModel(directory, status) {
+  const sections = [];
+  sections.push(`改动清单（git status）：\n${status.dirty.map((entry) => `${entry.status.padEnd(2)} ${entry.path}`).join('\n')}`);
+
+  const hasHead = await runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], directory);
+  const diffArgs = (hasHead.code === 0 ? ['diff', 'HEAD'] : ['diff'])
+    .concat(['--unified=2', '--no-color', '--no-ext-diff', '--no-renames', '--']);
+  const diff = await runGit(diffArgs, directory);
+  if (diff.code === 0 && diff.stdout.trim() !== '') {
+    sections.push(`差异（git diff）：\n${diff.stdout}`);
+  }
+
+  const untracked = status.dirty.filter((entry) => entry.status === '??').slice(0, 10);
+  const previews = [];
+  for (const entry of untracked) {
+    const preview = textPreview(join(status.root, entry.path), 40);
+    if (preview !== undefined) previews.push(`--- 新文件 ${entry.path} ---\n${preview}`);
+  }
+  if (previews.length > 0) sections.push(`新增文件内容预览：\n${previews.join('\n')}`);
+
+  let text = sections.join('\n\n');
+  if (text.length > MODEL_DIFF_LIMIT) {
+    text = `${text.slice(0, MODEL_DIFF_LIMIT)}\n…（内容已截断，只能根据以上片段判断）`;
+  }
+  return text;
+}
+
+export function buildCommitPrompt(status, diffText) {
+  const branch = status.detached ? 'detached HEAD' : status.branch;
+  return `仓库：${projectName(status.root)}（当前分支：${branch}）\n\n${diffText}\n\n请只输出一条提交信息，不要输出任何其他内容。`;
+}
+
+/**
+ * Normalize the model answer into a Conventional Commits message. Returns
+ * `undefined` for anything that is not exactly one valid message, so the caller
+ * can fall back instead of committing an invented subject.
+ */
+export function sanitizeCommitMessage(raw) {
+  if (typeof raw !== 'string') return undefined;
+  let text = raw.replace(/\r\n/g, '\n').trim();
+  text = text.replace(/^```[^\n]*\n?/, '').replace(/\n?```\s*$/, '').trim();
+  text = text.replace(/^(提交信息|提交说明|commit message|message)\s*[:：]\s*/i, '').trim();
+  text = text.replace(/^["'“”`]+/, '').replace(/["'“”`]+$/, '').trim();
+  if (text === '') return undefined;
+
+  const lines = text.split('\n');
+  const first = lines[0].trim().replace(/[。.]+$/, '');
+  const match = /^(feat|fix|docs|refactor|test|chore)(\([^()\n]{1,32}\))?!?:\s*(.+)$/.exec(first);
+  if (match === null) return undefined;
+  const subject = `${match[1]}${match[2] ?? ''}: ${match[3].trim()}`;
+  if (Array.from(subject).length > 100) return undefined;
+
+  const body = lines
+    .slice(1)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .slice(0, 5)
+    .join('\n');
+  if (body === '') return subject;
+  return `${subject}\n\n${body.slice(0, 600)}`;
+}
+
+function resolveModelConfig(ctx, session) {
+  try {
+    const header = typeof session.requestHeader === 'function' ? session.requestHeader() : undefined;
+    const config = header && header.config;
+    if (config && typeof config.provider === 'string' && config.provider !== ''
+      && typeof config.model === 'string' && config.model !== '') {
+      return { provider: config.provider, model: config.model };
+    }
+  } catch {
+    /* fall through to the default model */
+  }
+  const defaults = ctx.get('agentDefaultModel');
+  if (defaults && typeof defaults.currentSelection === 'function') {
+    try {
+      const selection = defaults.currentSelection();
+      if (selection && typeof selection.provider === 'string' && selection.provider !== ''
+        && typeof selection.model === 'string' && selection.model !== '') {
+        return { provider: selection.provider, model: selection.model };
+      }
+    } catch {
+      /* no model available */
+    }
+  }
+  return undefined;
+}
+
+async function generateCommitMessageWithModel(llm, modelConfig, status, diffText, session) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), MODEL_TIMEOUT_MS);
+  try {
+    const stream = llm.stream({
+      provider: modelConfig.provider,
+      model: modelConfig.model,
+      system: COMMIT_SYSTEM_PROMPT,
+      messages: [{
+        role: 'user',
+        content: [{ type: 'text', text: buildCommitPrompt(status, diffText) }],
+      }],
+      maxTokens: MODEL_MAX_TOKENS,
+      temperature: 0.2,
+      sessionId: session.id,
+      signal: controller.signal,
+    });
+
+    let raw = '';
+    for await (const chunk of stream) {
+      if (chunk.type === 'text-delta') raw += chunk.text;
+      else if (chunk.type === 'finish' && chunk.reason.kind === 'error') {
+        throw new Error(chunk.reason.failure?.message || '模型请求失败');
+      } else if (chunk.type === 'finish' && chunk.reason.kind === 'aborted') {
+        throw new Error('模型请求已取消或超时');
+      }
+    }
+    return sanitizeCommitMessage(raw);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Commit preview: deterministic file-level summary first (always available),
+ * then a model-written Conventional Commits message when the Host exposes its
+ * LLM service and the current session has a model. Any model failure keeps the
+ * deterministic message and reports why, so the UI can ask the user to edit it.
+ */
+async function prepareCommitForSession(ctx, session, directory) {
+  const prepared = await prepareCommit(directory);
+  const llm = ctx.get('llm');
+  if (llm === undefined || typeof llm.stream !== 'function') {
+    return { ...prepared, generated: 'files', fallbackReason: '当前 Host 未提供模型服务' };
+  }
+  const modelConfig = resolveModelConfig(ctx, session);
+  if (modelConfig === undefined) {
+    return { ...prepared, generated: 'files', fallbackReason: '无法确定当前会话使用的模型' };
+  }
+  try {
+    const diffText = await collectDiffForModel(directory, prepared.status);
+    const generated = await generateCommitMessageWithModel(llm, modelConfig, prepared.status, diffText, session);
+    if (generated === undefined) {
+      return { ...prepared, generated: 'files', fallbackReason: '模型返回的内容不是合法的 Conventional Commits 格式' };
+    }
+    return {
+      ...prepared,
+      message: generated,
+      generated: 'model',
+      model: `${modelConfig.provider}/${modelConfig.model}`,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return { ...prepared, generated: 'files', fallbackReason: cleanOutput(reason, 160) || '模型调用失败' };
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* Operations                                                          */
 /* ------------------------------------------------------------------ */
 
@@ -685,11 +890,17 @@ async function initRepository(directory) {
 /** Test-only surface: the operations above, without mounting the plugin. */
 export const __internals = {
   buildCommitMessage,
+  buildCommitPrompt,
   changeKind,
+  collectDiffForModel,
+  generateCommitMessageWithModel,
   parsePorcelainV2,
+  prepareCommit,
+  prepareCommitForSession,
   readStatus,
   readDiffStats,
-  prepareCommit,
+  resolveModelConfig,
+  sanitizeCommitMessage,
   switchBranch,
   createBranch,
   mergeBranch,
