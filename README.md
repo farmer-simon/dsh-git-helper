@@ -105,18 +105,27 @@ git commit -m <说明主题> -m <说明正文>
 
 要求：已安装 DSH（在 0.2.1-rc.3 的 Web / Desktop Web UI 上验证），并且运行 DSH 的机器上已安装 Git。使用模型生成提交说明时，还需要当前会话已配置可用的模型（不可用时自动回退）。
 
-把插件目录（或 `npm pack` 生成的 `.tgz`）放到目标机器上，然后任选一种方式安装：
+### 从 GitHub 安装（推荐）
 
-- 打开 DSH 的**插件管理页**，在添加入口中填入插件目录的绝对路径或 `.tgz` 路径；
-- 或使用命令行：
+```bash
+dsh plugin add "github:farmer-simon/dsh-git-helper"
+```
 
-  ```bash
-  dsh plugin add "D:/path/to/dsh-git-helper"
-  ```
+也可以在 DSH 的**插件管理页**的添加入口中填入同样的地址。
+
+### 从本地源码安装（开发 / 离线）
+
+先获取源码（`git clone https://github.com/farmer-simon/dsh-git-helper.git`，或直接把插件目录拷到目标机器），再执行：
+
+```bash
+dsh plugin add "D:/path/to/dsh-git-helper"
+```
+
+如果已用 `npm pack` 打成压缩包，也可以把上面的路径换成 `.tgz` 文件路径。
 
 安装完成后刷新 DSH 页面（必要时重启 DSH），输入框左下角就会出现分支标签。卸载时在插件管理页移除即可，不会改动你的仓库。
 
-> 本插件以本地链接方式安装时，移动或重命名插件目录会导致链接失效；需要迁移时请先移除插件，再从新位置重新安装。
+> GitHub 安装会以 git 依赖方式记录，可随仓库更新；本地目录安装会以本地链接方式记录绝对路径，移动或重命名插件目录会导致链接失效，需要先移除插件再从新位置重新安装。
 
 ## 实现与安全
 
