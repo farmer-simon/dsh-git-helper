@@ -23,6 +23,8 @@ const {
   mergeBranch,
   commitChanges,
   pushBranch,
+  listTags,
+  createTag,
   initRepository,
   parsePorcelainV2,
   buildCommitMessage,
@@ -278,6 +280,53 @@ await check('prepareCommitForSession falls back without an LLM service', async (
   assert.equal(prepared.generated, 'files');
   assert.match(prepared.fallbackReason, /模型服务/);
   rmSync(join(project, 'no-model-test.txt'));
+});
+
+/* --- tags ------------------------------------------------------------ */
+
+await check('listTags starts empty', async () => {
+  const result = await listTags(project);
+  assert.equal(result.status.repo, true);
+  assert.deepEqual(result.tags, []);
+});
+
+await check('createTag creates lightweight and annotated tags', async () => {
+  const lightweight = await createTag(project, 'v0.1.0');
+  assert.ok(lightweight.tags.some((tag) => tag.name === 'v0.1.0'));
+  const annotated = await createTag(project, 'v0.2.0', '发布 0.2.0');
+  const tag = annotated.tags.find((entry) => entry.name === 'v0.2.0');
+  assert.ok(tag);
+  assert.equal(tag.subject, '发布 0.2.0');
+  assert.match(tag.date, /^\d{4}-\d{2}-\d{2}$/);
+  assert.match(annotated.output, /附注标签/);
+});
+
+await check('createTag rejects duplicates and invalid names', async () => {
+  await assert.rejects(() => createTag(project, 'v0.1.0'), /已存在/);
+  await assert.rejects(() => createTag(project, 'bad name'), /不合法/);
+  await assert.rejects(() => createTag(project, '-bad'), /不合法/);
+});
+
+await check('createTag pushes the tag to a local remote', async () => {
+  const result = await createTag(project, 'v0.3.0', '推送标签', true);
+  assert.equal(result.pushed, true);
+  assert.equal(result.pushError, undefined);
+  const remoteTags = await runGit(['ls-remote', '--tags', 'origin'], project);
+  assert.match(remoteTags.stdout, /refs\/tags\/v0\.3\.0/);
+});
+
+await check('createTag reports push failure without a remote', async () => {
+  const bare = join(root, 'tagless');
+  mkdirSync(bare);
+  git(bare, 'init', '-b', 'main');
+  configure(bare);
+  writeFileSync(join(bare, 'file.txt'), 'tagless\n');
+  git(bare, 'add', '-A');
+  git(bare, 'commit', '-m', '初始化');
+  const result = await createTag(bare, 'v0.0.1', undefined, true);
+  assert.equal(result.pushed, false);
+  assert.match(result.pushError, /远程仓库/);
+  assert.ok(result.tags.some((tag) => tag.name === 'v0.0.1'));
 });
 
 rmSync(root, { recursive: true, force: true });

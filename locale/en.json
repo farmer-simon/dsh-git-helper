@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Git Helper",
-    "description": "Shows the current project's Git branch beside the composer. Switch, create or merge branches, commit with a model-written Conventional Commits message, push, and initialize a repository."
+    "description": "Shows the current project's Git branch beside the composer. Switch, create or merge branches, commit with a model-written Conventional Commits message, create and push tags, push, and initialize a repository."
   }
 }

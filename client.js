@@ -45,6 +45,20 @@ window.__ModuleLoader__.load({
         mergeBranch: '合并分支…',
         commitChanges: '提交变更…',
         push: '推送',
+        tags: '标签',
+        tagTitle: '标签',
+        tagListTitle: '已有标签',
+        tagEmpty: '还没有标签',
+        tagLoading: '正在读取标签…',
+        newTagTitle: '新建标签',
+        tagName: '标签名',
+        tagNamePlaceholder: 'v1.2.0',
+        tagMessage: '说明（可选，填写后创建附注标签）',
+        tagPush: '创建后推送到远程',
+        createTagAction: '创建标签',
+        tagCreated: '标签已创建',
+        tagPushed: '标签已创建并推送',
+        tagCreatedPushFailed: '标签已创建，但推送失败：{error}',
         initRepo: '初始化 Git 仓库',
         notRepoTitle: '当前项目还不是 Git 仓库',
         notRepoDesc: '初始化后即可在这里切换分支、提交并推送。',
@@ -100,6 +114,20 @@ window.__ModuleLoader__.load({
         mergeBranch: 'Merge branch…',
         commitChanges: 'Commit changes…',
         push: 'Push',
+        tags: 'Tags',
+        tagTitle: 'Tags',
+        tagListTitle: 'Existing tags',
+        tagEmpty: 'No tags yet',
+        tagLoading: 'Reading tags…',
+        newTagTitle: 'New tag',
+        tagName: 'Tag name',
+        tagNamePlaceholder: 'v1.2.0',
+        tagMessage: 'Message (optional; creates an annotated tag)',
+        tagPush: 'Push the tag after creating it',
+        createTagAction: 'Create tag',
+        tagCreated: 'Tag created',
+        tagPushed: 'Tag created and pushed',
+        tagCreatedPushFailed: 'Tag created, but the push failed: {error}',
         initRepo: 'Initialize Git repository',
         notRepoTitle: 'This project is not a Git repository',
         notRepoDesc: 'Initialize it to switch branches, commit and push from here.',
@@ -228,6 +256,10 @@ window.__ModuleLoader__.load({
         h('path', { key: 'a', d: 'M12 20V5' }),
         h('path', { key: 'b', d: 'M6 11l6-6 6 6' }),
       ]),
+      tag: () => icon([
+        h('path', { key: 'a', d: 'M20.6 13.4l-7.2 7.2a2 2 0 0 1-2.8 0L3 13V3h10l7.6 7.6a2 2 0 0 1 0 2.8z' }),
+        h('circle', { key: 'b', cx: 7.5, cy: 7.5, r: 1.4 }),
+      ]),
       repo: () => icon([
         h('path', { key: 'a', d: 'M4 5.5A2.5 2.5 0 0 1 6.5 3H19v18H6.5A2.5 2.5 0 0 1 4 18.5z' }),
         h('path', { key: 'b', d: 'M4 17.5h15' }),
@@ -320,6 +352,13 @@ window.__ModuleLoader__.load({
 .gh-input:focus, .gh-textarea:focus, .gh-select:focus { border-color: var(--dsw-alias-brand-primary); }
 .gh-files { display: flex; flex-direction: column; gap: 1px; color: var(--dsw-alias-label-secondary); font-size: 11px; max-height: 84px; overflow: auto; }
 .gh-files span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-tag-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; }
+.gh-tag-row:hover { background: color-mix(in srgb, var(--dsw-alias-label-primary) 6%, transparent); }
+.gh-tag-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.gh-tag-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-tag-subject { font-size: 11px; color: var(--dsw-alias-label-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gh-check { display: flex; align-items: center; gap: 6px; color: var(--dsw-alias-label-secondary); cursor: pointer; }
+.gh-check input { margin: 0; accent-color: var(--dsw-alias-brand-primary); }
 .gh-foot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 2px; }
 .gh-btn {
   height: 28px; padding: 0 12px; border-radius: 8px; border: 1px solid var(--dsw-alias-border-l1);
@@ -393,6 +432,11 @@ window.__ModuleLoader__.load({
         const [commitFiles, setCommitFiles] = React.useState([]);
         const [preparing, setPreparing] = React.useState(false);
         const [messageInfo, setMessageInfo] = React.useState(null);
+        const [tags, setTags] = React.useState([]);
+        const [tagName, setTagName] = React.useState('');
+        const [tagMessage, setTagMessage] = React.useState('');
+        const [tagPush, setTagPush] = React.useState(false);
+        const [tagLoading, setTagLoading] = React.useState(false);
         /* Latest session id, for dropping responses that arrive after a switch. */
         const sessionRef = React.useRef(sessionId);
         sessionRef.current = sessionId;
@@ -427,6 +471,11 @@ window.__ModuleLoader__.load({
           setBusy(false);
           setPreparing(false);
           setMessageInfo(null);
+          setTags([]);
+          setTagName('');
+          setTagMessage('');
+          setTagPush(false);
+          setTagLoading(false);
           setView('main');
           setOpen(false);
           setBranchName('');
@@ -546,6 +595,48 @@ window.__ModuleLoader__.load({
             setCommitFiles([]);
             setMessageInfo(null);
             setView('main');
+          }
+        };
+
+        const openTags = async () => {
+          if (sessionId === '') return;
+          const activeSession = sessionId;
+          setView('tags');
+          setError(null);
+          setNotice(null);
+          setTagLoading(true);
+          setBusy(true);
+          try {
+            const data = await request(activeSession, 'tags');
+            if (sessionRef.current !== activeSession) return;
+            setTags(Array.isArray(data.tags) ? data.tags : []);
+            applyStatus(data.status);
+          } catch (failure) {
+            if (sessionRef.current === activeSession) setError(messageOf(failure));
+          } finally {
+            setBusy(false);
+            setTagLoading(false);
+          }
+        };
+
+        const submitTag = async () => {
+          const name = tagName.trim();
+          if (name === '') return;
+          const data = await run('create-tag', {
+            name,
+            message: tagMessage.trim(),
+            push: tagPush,
+          }, t('tagCreated'));
+          if (data !== undefined) {
+            setTags(Array.isArray(data.tags) ? data.tags : []);
+            setTagName('');
+            setTagMessage('');
+            setTagPush(false);
+            if (typeof data.pushError === 'string' && data.pushError !== '') {
+              setNotice({ kind: 'error', text: t('tagCreatedPushFailed', { error: data.pushError }) });
+            } else if (data.pushed === true) {
+              setNotice({ kind: 'success', text: t('tagPushed') });
+            }
           }
         };
 
@@ -690,6 +781,7 @@ window.__ModuleLoader__.load({
             actionRow('merge', icons.merge, t('mergeBranch'), () => { setView('merge'); setMergeTarget(''); setError(null); setNotice(null); }, { disabled: branches.length < 2 || status.detached }),
             actionRow('commit', icons.commit, t('commitChanges'), () => { void beginCommit(); }, { badge: dirtyCount }),
             actionRow('push', icons.push, t('push'), async () => { await run('push', {}, t('pushed')); }),
+            actionRow('tags', icons.tag, t('tags'), () => { void openTags(); }),
           );
         };
 
@@ -816,6 +908,60 @@ window.__ModuleLoader__.load({
           ),
         );
 
+        const tagsView = () => h('div', { className: 'gh-view' },
+          h('div', { className: 'gh-view-head' }, backButton(), h('span', { className: 'gh-view-title' }, t('tagTitle'))),
+          h('div', { className: 'gh-section-title' }, t('tagListTitle')),
+          tagLoading
+            ? h('div', { className: 'gh-empty' }, t('tagLoading'))
+            : tags.length === 0
+              ? h('div', { className: 'gh-empty' }, t('tagEmpty'))
+              : h('div', { className: 'gh-scroll' }, tags.map((tag) => h('div', {
+                key: tag.name,
+                className: 'gh-tag-row',
+                title: tag.subject ? `${tag.name} · ${tag.subject}` : tag.name,
+              },
+              h('span', { className: 'gh-row-icon' }, icons.tag()),
+              h('div', { className: 'gh-tag-main' },
+                h('span', { className: 'gh-tag-name' }, tag.name),
+                tag.subject ? h('span', { className: 'gh-tag-subject' }, tag.subject) : null),
+              h('span', { className: 'gh-row-hint' }, tag.date || ''),
+              ))),
+          h('div', { className: 'gh-section-title' }, t('newTagTitle')),
+          h('label', { className: 'gh-field' },
+            h('span', null, t('tagName')),
+            h('input', {
+              className: 'gh-input', type: 'text', value: tagName, autoFocus: true,
+              placeholder: t('tagNamePlaceholder'),
+              onChange: (event) => setTagName(event.target.value),
+              onKeyDown: (event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault();
+                  void submitTag();
+                }
+              },
+            })),
+          h('label', { className: 'gh-field' },
+            h('span', null, t('tagMessage')),
+            h('input', {
+              className: 'gh-input', type: 'text', value: tagMessage,
+              onChange: (event) => setTagMessage(event.target.value),
+            })),
+          h('label', { className: 'gh-check' },
+            h('input', {
+              type: 'checkbox', checked: tagPush,
+              onChange: (event) => setTagPush(event.target.checked),
+            }),
+            h('span', null, t('tagPush'))),
+          h('div', { className: 'gh-foot' },
+            h('button', { type: 'button', className: 'gh-btn', onClick: () => setView('main') }, t('cancel')),
+            h('button', {
+              type: 'button', className: 'gh-btn gh-btn-primary',
+              disabled: busy || tagName.trim() === '',
+              onClick: () => { void submitTag(); },
+            }, t('createTagAction')),
+          ),
+        );
+
         const unavailableView = () => h('div', { className: 'gh-view' },
           h('div', { className: 'gh-empty' }, t('serviceError')),
           h('div', { className: 'gh-foot' },
@@ -840,7 +986,8 @@ window.__ModuleLoader__.load({
           : view === 'create' ? createView()
             : view === 'merge' ? mergeView()
               : view === 'commit' ? commitView()
-                : mainView(),
+                : view === 'tags' ? tagsView()
+                  : mainView(),
         );
 
         return h('div', { className: 'gh-wrap', ref: rootRef },

@@ -1,8 +1,8 @@
 {
   "name": "dsh-git-helper",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "Git assistant inside the DSH composer: current branch, branch switching/creation/merging, AI-written Conventional Commits messages, push, and repository init.",
+  "description": "Git assistant inside the DSH composer: current branch, branch switching/creation/merging, AI-written Conventional Commits messages, tags, push, and repository init.",
   "type": "module",
   "main": "index.js",
   "exports": {

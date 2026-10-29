@@ -191,6 +191,10 @@ async function runAction(ctx, session, action, body, directory) {
       return commitChanges(directory, requireString(body.message, '提交说明'));
     case 'push':
       return pushBranch(directory);
+    case 'tags':
+      return listTags(directory);
+    case 'create-tag':
+      return createTag(directory, requireString(body.name, '标签名'), optionalString(body.message), body.push === true);
     case 'init':
       return initRepository(directory);
     default:
@@ -876,6 +880,83 @@ async function pushBranch(directory) {
   };
 }
 
+async function readTags(root) {
+  const result = await runGit([
+    'for-each-ref',
+    '--sort=-creatordate',
+    '--count=50',
+    '--format=%(refname:short)%09%(objectname:short)%09%(creatordate:short)%09%(contents:subject)',
+    'refs/tags',
+  ], root);
+  if (result.code !== 0) throw new GitHelperError(gitFailure(result, '读取标签失败'));
+  return result.stdout
+    .split('\n')
+    .filter((line) => line !== '')
+    .map((line) => {
+      const fields = line.split('\t');
+      return {
+        name: fields[0] ?? '',
+        hash: fields[1] ?? '',
+        date: fields[2] ?? '',
+        subject: fields.slice(3).join('\t'),
+      };
+    });
+}
+
+async function listTags(directory) {
+  const status = await readStatus(directory);
+  if (!status.repo) throw new GitHelperError('当前项目还不是 Git 仓库');
+  return { tags: await readTags(status.root), status };
+}
+
+/**
+ * Create a lightweight tag, or an annotated tag when a message is given, then
+ * optionally push exactly that tag. A push failure is reported separately: the
+ * local tag already exists, so the UI explains the partial outcome instead of
+ * pretending nothing happened.
+ */
+async function createTag(directory, name, message, push) {
+  const status = await readStatus(directory);
+  if (!status.repo) throw new GitHelperError('当前项目还不是 Git 仓库');
+  const tagName = String(name ?? '').trim();
+  if (tagName.startsWith('-')) throw new GitHelperError(`标签名「${tagName}」不合法`);
+
+  const valid = ensureSpawned(await runGit(['check-ref-format', `refs/tags/${tagName}`], status.root));
+  if (valid.code !== 0) throw new GitHelperError(`标签名「${tagName}」不合法`);
+
+  const existing = await runGit(['rev-parse', '--verify', '--quiet', `refs/tags/${tagName}`], status.root);
+  if (existing.code === 0) throw new GitHelperError(`标签 ${tagName} 已存在`);
+
+  const tagMessage = typeof message === 'string' ? message.trim() : '';
+  const created = tagMessage === ''
+    ? await runGit(['tag', tagName], status.root)
+    : await runGit(['tag', '-a', tagName, '-m', tagMessage], status.root);
+  if (created.code !== 0) throw new GitHelperError(gitFailure(created, `创建标签 ${tagName} 失败`));
+
+  let pushed = false;
+  let pushError;
+  if (push === true) {
+    const remotesResult = ensureSpawned(await runGit(['remote'], status.root));
+    const remotes = remotesResult.stdout.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+    if (remotes.length === 0) {
+      pushError = '尚未配置远程仓库，标签只创建在本地';
+    } else {
+      const remote = remotes.includes('origin') ? 'origin' : remotes[0];
+      const pushedResult = await runGit(['push', remote, `refs/tags/${tagName}`], status.root);
+      if (pushedResult.code === 0) pushed = true;
+      else pushError = cleanOutput(`${pushedResult.stderr}\n${pushedResult.stdout}`, 600) || '推送标签失败';
+    }
+  }
+
+  return {
+    output: `已创建${tagMessage === '' ? '轻量' : '附注'}标签 ${tagName}`,
+    pushed,
+    pushError,
+    tags: await readTags(status.root),
+    status: await readStatus(directory),
+  };
+}
+
 async function initRepository(directory) {
   const current = await readStatus(directory);
   if (current.repo) return { output: '已经是 Git 仓库', status: current };
@@ -906,6 +987,8 @@ export const __internals = {
   mergeBranch,
   commitChanges,
   pushBranch,
+  listTags,
+  createTag,
   initRepository,
   runGit,
 };
